@@ -1,16 +1,31 @@
+import json
 from datetime import datetime
 from random import getrandbits
 
 import botocore.exceptions
 import pytest
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, padding
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 from cryptography.hazmat.primitives.serialization import load_der_public_key
 
-from localstack.utils.crypto import encrypt
+from localstack.aws.accounts import get_aws_account_id
+from localstack.utils.aws.aws_stack import get_region
 from localstack.utils.strings import short_uid
+
+
+def _is_alias_there(kms_client, alias_name, key_id=None):
+    next_token = None
+    while True:
+        kwargs = {"nextToken": next_token} if next_token else {}
+        if key_id:
+            kwargs["KeyId"] = key_id
+        response = kms_client.list_aliases(**kwargs)
+        for alias in response["Aliases"]:
+            if alias["AliasName"] == alias_name:
+                return True
+        if "nextToken" not in response:
+            break
+        next_token = response["nextToken"]
+    return False
 
 
 class TestKMS:
@@ -20,8 +35,8 @@ class TestKMS:
 
     @pytest.mark.aws_validated
     def test_create_key(self, kms_client, sts_client):
-        account_id = sts_client.get_caller_identity()["Account"]
-        region = sts_client.meta.region_name
+        account_id = get_aws_account_id()
+        region = get_region()
 
         response = kms_client.list_keys()
         assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
@@ -38,6 +53,36 @@ class TestKMS:
         assert response["KeyId"] == key_id
         assert f":{region}:" in response["Arn"]
         assert f":{account_id}:" in response["Arn"]
+
+    def test_schedule_and_cancel_key_deletion(self, kms_client, kms_create_key):
+        key_id = kms_create_key()["KeyId"]
+        kms_client.schedule_key_deletion(KeyId=key_id)
+        result = kms_client.describe_key(KeyId=key_id)
+        assert result["KeyMetadata"]["Enabled"] is False
+        assert result["KeyMetadata"]["KeyState"] == "PendingDeletion"
+        assert result["KeyMetadata"]["DeletionDate"]
+
+        kms_client.cancel_key_deletion(KeyId=key_id)
+        result = kms_client.describe_key(KeyId=key_id)
+        assert result["KeyMetadata"]["Enabled"] is False
+        assert result["KeyMetadata"]["KeyState"] == "Disabled"
+        assert not result["KeyMetadata"].get("DeletionDate")
+
+    def test_disable_and_enable_key(self, kms_client, kms_create_key):
+        key_id = kms_create_key()["KeyId"]
+        result = kms_client.describe_key(KeyId=key_id)
+        assert result["KeyMetadata"]["Enabled"] is True
+        assert result["KeyMetadata"]["KeyState"] == "Enabled"
+
+        kms_client.disable_key(KeyId=key_id)
+        result = kms_client.describe_key(KeyId=key_id)
+        assert result["KeyMetadata"]["Enabled"] is False
+        assert result["KeyMetadata"]["KeyState"] == "Disabled"
+
+        kms_client.enable_key(KeyId=key_id)
+        result = kms_client.describe_key(KeyId=key_id)
+        assert result["KeyMetadata"]["Enabled"] is True
+        assert result["KeyMetadata"]["KeyState"] == "Enabled"
 
     @pytest.mark.aws_validated
     def test_create_grant_with_invalid_key(self, kms_client, user_arn):
@@ -95,10 +140,44 @@ class TestKMS:
         grants_after = kms_client.list_grants(KeyId=key_id)["Grants"]
         assert len(grants_after) == len(grants_before) - 1
 
-    def test_asymmetric_keys(self, kms_client, kms_key):
-        key_id = kms_key["KeyId"]
+    def test_list_retirable_grants(self, kms_client, kms_create_key, kms_create_grant):
+        retiring_principal_arn_prefix = (
+            "arn:aws:kms:eu-central-1:123456789876:key/198a5a78-52c3-489f-ac70-"
+        )
+        right_retiring_principal = retiring_principal_arn_prefix + "000000000001"
+        wrong_retiring_principal = retiring_principal_arn_prefix + "000000000002"
+        key_id = kms_create_key()["KeyId"]
+        right_grant_id = kms_create_grant(KeyId=key_id, RetiringPrincipal=right_retiring_principal)[
+            0
+        ]
+        wrong_grant_id_one = kms_create_grant(
+            KeyId=key_id, RetiringPrincipal=wrong_retiring_principal
+        )[0]
+        wrong_grant_id_two = kms_create_grant(KeyId=key_id)[0]
+        wrong_grant_ids = [wrong_grant_id_one, wrong_grant_id_two]
 
-        # generate key pair without plaintext
+        next_token = None
+        right_grant_found = False
+        wrong_grant_found = False
+        while True:
+            kwargs = {"nextToken": next_token} if next_token else {}
+            response = kms_client.list_retirable_grants(
+                RetiringPrincipal=right_retiring_principal, **kwargs
+            )
+            for grant in response["Grants"]:
+                if grant["GrantId"] == right_grant_id:
+                    right_grant_found = True
+                if grant["GrantId"] in wrong_grant_ids:
+                    wrong_grant_found = True
+            if "nextToken" not in response:
+                break
+            next_token = response["nextToken"]
+
+        assert right_grant_found
+        assert not wrong_grant_found
+
+    def test_generate_data_key_pair_without_plaintext(self, kms_client, kms_key):
+        key_id = kms_key["KeyId"]
         result = kms_client.generate_data_key_pair_without_plaintext(
             KeyId=key_id, KeyPairSpec="RSA_2048"
         )
@@ -106,17 +185,12 @@ class TestKMS:
         assert not result.get("PrivateKeyPlaintext")
         assert result.get("PublicKey")
 
-        # generate key pair
+    def test_generate_data_key_pair(self, kms_client, kms_key):
+        key_id = kms_key["KeyId"]
         result = kms_client.generate_data_key_pair(KeyId=key_id, KeyPairSpec="RSA_2048")
         assert result.get("PrivateKeyCiphertextBlob")
         assert result.get("PrivateKeyPlaintext")
         assert result.get("PublicKey")
-
-        # get public key
-        result1 = kms_client.get_public_key(KeyId=key_id)
-        assert result.get("KeyId") == result1.get("KeyId")
-        assert result.get("KeyPairSpec") == result1.get("KeySpec")
-        assert result.get("PublicKey") == result1.get("PublicKey")
 
         # assert correct value of encrypted key
         decrypted = kms_client.decrypt(
@@ -132,30 +206,18 @@ class TestKMS:
 
         message = b"test message 123 !%$@"
         algo = "RSASSA_PSS_SHA_256" if key_type == "rsa" else "ECDSA_SHA_384"
-        result = kms_client.sign(
-            KeyId=key_id, Message=message, MessageType="RAW", SigningAlgorithm=algo
-        )
-
-        def _verify(signature):
-            kwargs = {}
-            if key_type == "rsa":
-                kwargs["padding"] = padding.PSS(
-                    mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH
-                )
-                kwargs["algorithm"] = hashes.SHA256()
-            else:
-                kwargs["signature_algorithm"] = ec.ECDSA(algorithm=hashes.SHA384())
-            public_key.verify(signature=signature, data=message, **kwargs)
-
-        public_key_data = kms_client.get_public_key(KeyId=key_id)["PublicKey"]
-        public_key = serialization.load_der_public_key(public_key_data)
-        _verify(result["Signature"])
-        with pytest.raises(InvalidSignature):
-            _verify(result["Signature"] + b"foobar")
+        kwargs = {"KeyId": key_id, "Message": message, "SigningAlgorithm": algo}
+        signature = kms_client.sign(**kwargs)["Signature"]
+        assert kms_client.verify(Signature=signature, **kwargs)["SignatureValid"]
 
     def test_get_public_key(self, kms_client, kms_create_key):
-        key_id = kms_create_key(KeyUsage="ENCRYPT_DECRYPT", KeySpec="RSA_2048")["KeyId"]
-        kms_client.get_public_key(KeyId=key_id)
+        key = kms_create_key(KeyUsage="ENCRYPT_DECRYPT", KeySpec="RSA_2048")
+        key_id = key["KeyId"]
+        response = kms_client.get_public_key(KeyId=key_id)
+        assert response.get("KeyId") == key_id
+        assert response.get("KeySpec") == key["KeySpec"]
+        assert response.get("KeyUsage") == key["KeyUsage"]
+        assert response.get("PublicKey")
 
     @pytest.mark.aws_validated
     def test_get_and_list_sign_key(self, kms_client, kms_create_key):
@@ -174,8 +236,8 @@ class TestKMS:
 
         assert found is True
 
-    def test_import_key(self, kms_client, kms_key):
-        key_id = kms_key["KeyId"]
+    def test_import_key(self, kms_client, kms_create_key):
+        key_id = kms_create_key(Origin="EXTERNAL")["KeyId"]
 
         # get key import params
         params = kms_client.get_parameters_for_import(
@@ -203,27 +265,21 @@ class TestKMS:
         # use key to encrypt/decrypt data
         plaintext = b"test content 123 !#"
         encrypt_result = kms_client.encrypt(Plaintext=plaintext, KeyId=key_id)
-        encrypted = encrypt(symmetric_key, plaintext)
-        assert encrypt_result["CiphertextBlob"] == encrypted
         api_decrypted = kms_client.decrypt(
             CiphertextBlob=encrypt_result["CiphertextBlob"], KeyId=key_id
         )
         assert api_decrypted["Plaintext"] == plaintext
 
     @pytest.mark.aws_validated
-    def test_list_aliases_of_key(self, kms_client, kms_create_key):
-        aliased_key = kms_create_key()
-        comparison_key = kms_create_key()
+    def test_list_aliases_of_key(self, kms_client, kms_create_key, kms_create_alias):
+        aliased_key_id = kms_create_key()["KeyId"]
+        comparison_key_id = kms_create_key()["KeyId"]
 
         alias_name = f"alias/{short_uid()}"
+        kms_create_alias(AliasName=alias_name, TargetKeyId=aliased_key_id)
 
-        kms_client.create_alias(AliasName=alias_name, TargetKeyId=aliased_key["KeyId"])
-
-        response = kms_client.list_aliases(KeyId=aliased_key["KeyId"])
-        assert len(response["Aliases"]) == 1
-
-        response = kms_client.list_aliases(KeyId=comparison_key["KeyId"])
-        assert len(response["Aliases"]) == 0
+        assert _is_alias_there(kms_client, alias_name, aliased_key_id) is True
+        assert _is_alias_there(kms_client, alias_name, comparison_key_id) is False
 
     # Key ARNs, key IDs, aliases of keys and ARNs of those aliases are supposed to work.
     def test_all_types_of_key_id_can_be_used_for_encryption(
@@ -246,3 +302,135 @@ class TestKMS:
         kms_client.encrypt(KeyId=key_id, Plaintext="encrypt-me")
         kms_client.encrypt(KeyId=alias_arn, Plaintext="encrypt-me")
         kms_client.encrypt(KeyId=alias_name, Plaintext="encrypt-me")
+
+    def test_create_multi_region_key(self, kms_create_key):
+        key = kms_create_key(MultiRegion=True)
+        assert key["KeyId"].startswith("mrk-")
+        assert key["MultiRegion"]
+
+    def test_non_multi_region_keys_should_not_have_multi_region_properties(self, kms_create_key):
+        key = kms_create_key(MultiRegion=False)
+        assert not key["KeyId"].startswith("mrk-")
+        assert not key["MultiRegion"]
+
+    def test_replicate_key(self, create_boto_client, kms_create_key):
+        region_to_replicate_from = "us-east-1"
+        region_to_replicate_to = "us-west-1"
+        from_region_client = create_boto_client("kms", region_to_replicate_from)
+        to_region_client = create_boto_client("kms", region_to_replicate_to)
+
+        key_id = kms_create_key(region=region_to_replicate_from, MultiRegion=True)["KeyId"]
+        with pytest.raises(to_region_client.exceptions.NotFoundException):
+            to_region_client.describe_key(KeyId=key_id)
+
+        from_region_client.replicate_key(KeyId=key_id, ReplicaRegion=region_to_replicate_to)
+        to_region_client.describe_key(KeyId=key_id)
+        from_region_client.describe_key(KeyId=key_id)
+
+    def test_update_key_description(self, kms_client, kms_create_key):
+        old_description = "old_description"
+        new_description = "new_description"
+        key = kms_create_key(Description=old_description)
+        key_id = key["KeyId"]
+        assert (
+            kms_client.describe_key(KeyId=key_id)["KeyMetadata"]["Description"] == old_description
+        )
+        result = kms_client.update_key_description(KeyId=key_id, Description=new_description)
+        assert "ResponseMetadata" in result
+        assert (
+            kms_client.describe_key(KeyId=key_id)["KeyMetadata"]["Description"] == new_description
+        )
+
+    def test_key_rotation_status(self, kms_client, kms_key):
+        key_id = kms_key["KeyId"]
+        # According to AWS docs, supposed to be False by default.
+        assert kms_client.get_key_rotation_status(KeyId=key_id)["KeyRotationEnabled"] is False
+        kms_client.enable_key_rotation(KeyId=key_id)
+        assert kms_client.get_key_rotation_status(KeyId=key_id)["KeyRotationEnabled"] is True
+        kms_client.disable_key_rotation(KeyId=key_id)
+        assert kms_client.get_key_rotation_status(KeyId=key_id)["KeyRotationEnabled"] is False
+
+    def test_create_list_delete_alias(self, kms_client, kms_create_alias):
+        alias_name = f"alias/{short_uid()}"
+        assert _is_alias_there(kms_client, alias_name) is False
+        kms_create_alias(AliasName=alias_name)
+        assert _is_alias_there(kms_client, alias_name) is True
+        kms_client.delete_alias(AliasName=alias_name)
+        assert _is_alias_there(kms_client, alias_name) is False
+
+    def test_get_put_list_key_policies(self, kms_client, kms_create_key):
+        base_policy = {
+            "Version": "2012-10-17",
+            "Id": "key-default-1",
+            "Statement": [
+                {
+                    "Sid": "This is the default key policy",
+                    "Effect": "Allow",
+                    "Principal": {"AWS": f"arn:aws:iam::{get_aws_account_id()}:root"},
+                    "Action": "kms:*",
+                    "Resource": "*",
+                },
+                {
+                    "Sid": "This is some additional stuff to look special",
+                    "Effect": "Allow",
+                    "Principal": {"AWS": f"arn:aws:iam::{get_aws_account_id()}:root"},
+                    "Action": "kms:*",
+                    "Resource": "*",
+                },
+            ],
+        }
+        policy_one = base_policy.copy()
+        policy_one["Statement"][1]["Action"] = "kms:ListAliases"
+        policy_one = json.dumps(policy_one)
+        policy_two = base_policy.copy()
+        policy_two["Statement"][1]["Action"] = "kms:ListGrants"
+        policy_two = json.dumps(policy_two)
+
+        key_id = kms_create_key(Policy=policy_one)["KeyId"]
+        # AWS currently supports only the default policy, so just a fixed response.
+        response = kms_client.list_key_policies(KeyId=key_id)
+        assert response.get("PolicyNames") == ["default"]
+        assert response.get("Truncated") is False
+        assert kms_client.get_key_policy(KeyId=key_id, PolicyName="default")["Policy"] == policy_one
+        kms_client.put_key_policy(KeyId=key_id, PolicyName="default", Policy=policy_two)
+        assert kms_client.get_key_policy(KeyId=key_id, PolicyName="default")["Policy"] == policy_two
+
+    def test_tag_untag_list_tags(self, kms_client, kms_create_key):
+        def _create_tag(key):
+            return {"TagKey": key, "TagValue": short_uid()}
+
+        def _are_tags_there(tags, key_id):
+            if not tags:
+                return True
+            next_token = None
+            while True:
+                kwargs = {"nextToken": next_token} if next_token else {}
+                response = kms_client.list_resource_tags(KeyId=key_id, **kwargs)
+                for response_tag in response["Tags"]:
+                    for i in range(len(tags)):
+                        if response_tag.get("TagKey") == tags[i].get("TagKey") and response_tag.get(
+                            "TagValue"
+                        ) == tags[i].get("TagValue"):
+                            del tags[i]
+                            if not tags:
+                                return True
+                            break
+                if "nextToken" not in response:
+                    break
+                next_token = response["nextToken"]
+            return False
+
+        old_tag_one = _create_tag("one")
+        new_tag_one = _create_tag("one")
+        tag_two = _create_tag("two")
+        tag_three = _create_tag("three")
+
+        key_id = kms_create_key(Tags=[old_tag_one, tag_two])["KeyId"]
+        assert _are_tags_there([old_tag_one, tag_two], key_id) is True
+        # Going to rewrite one of the tags and then add a new one.
+        kms_client.tag_resource(KeyId=key_id, Tags=[new_tag_one, tag_three])
+        assert _are_tags_there([new_tag_one, tag_two, tag_three], key_id) is True
+        assert _are_tags_there([old_tag_one], key_id) is False
+        kms_client.untag_resource(KeyId=key_id, TagKeys=[new_tag_one.get("TagKey")])
+        assert _are_tags_there([tag_two, tag_three], key_id) is True
+        assert _are_tags_there([new_tag_one], key_id) is False
