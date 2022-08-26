@@ -3,8 +3,8 @@ from io import BytesIO
 
 import pytest
 
+from localstack.aws.api.lambda_ import Runtime
 from localstack.services.awslambda.lambda_api import LAMBDA_DEFAULT_HANDLER
-from localstack.services.awslambda.lambda_utils import LAMBDA_RUNTIME_PYTHON37
 from localstack.utils import testutil
 from localstack.utils.common import short_uid
 
@@ -35,7 +35,7 @@ class TestLambdaSizeLimits:
 
         # upload zip file to S3
         zip_file = testutil.create_lambda_archive(
-            code_str, get_content=True, runtime=LAMBDA_RUNTIME_PYTHON37
+            code_str, get_content=True, runtime=Runtime.python3_7
         )
         s3_client.upload_fileobj(BytesIO(zip_file), s3_bucket, bucket_key)
 
@@ -43,7 +43,7 @@ class TestLambdaSizeLimits:
         with pytest.raises(lambda_client.exceptions.InvalidParameterValueException) as e:
             lambda_client.create_function(
                 FunctionName=function_name,
-                Runtime=LAMBDA_RUNTIME_PYTHON37,
+                Runtime=Runtime.python3_7,
                 Handler=LAMBDA_DEFAULT_HANDLER,
                 Role=lambda_su_role,
                 Code={"S3Bucket": s3_bucket, "S3Key": bucket_key},
@@ -59,7 +59,7 @@ class TestLambdaSizeLimits:
 
         # upload zip file to S3
         zip_file = testutil.create_lambda_archive(
-            code_str, get_content=True, runtime=LAMBDA_RUNTIME_PYTHON37
+            code_str, get_content=True, runtime=Runtime.python3_7
         )
         s3_client.upload_fileobj(BytesIO(zip_file), s3_bucket, bucket_key)
 
@@ -67,7 +67,7 @@ class TestLambdaSizeLimits:
         try:
             result = lambda_client.create_function(
                 FunctionName=function_name,
-                Runtime=LAMBDA_RUNTIME_PYTHON37,
+                Runtime=Runtime.python3_7,
                 Handler=LAMBDA_DEFAULT_HANDLER,
                 Role=lambda_su_role,
                 Code={"S3Bucket": s3_bucket, "S3Key": bucket_key},
