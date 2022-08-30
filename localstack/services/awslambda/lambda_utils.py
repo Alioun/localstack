@@ -46,7 +46,6 @@ LAMBDA_RUNTIME_JAVA11 = Runtime.java11
 LAMBDA_RUNTIME_DOTNETCORE31 = Runtime.dotnetcore3_1
 LAMBDA_RUNTIME_DOTNET6 = Runtime.dotnet6
 LAMBDA_RUNTIME_GOLANG = Runtime.go1_x
-# LAMBDA_RUNTIME_RUBY = LambdaRuntime.RUBY # TODO: this doesn't actually exist
 LAMBDA_RUNTIME_RUBY27 = Runtime.ruby2_7
 LAMBDA_RUNTIME_PROVIDED = Runtime.provided
 LAMBDA_RUNTIME_PROVIDED_AL2 = Runtime.provided_al2
@@ -138,13 +137,13 @@ def get_handler_file_from_name(handler_name: str, runtime: str = None):
 
     if runtime.startswith(LAMBDA_RUNTIME_PROVIDED):
         return "bootstrap"
-    if runtime.startswith(LAMBDA_RUNTIME_NODEJS):
+    if runtime.startswith("nodejs"):
         return format_name_to_path(handler_name, ".", ".js")
     if runtime.startswith(LAMBDA_RUNTIME_GOLANG):
         return handler_name
     if runtime.startswith(tuple(DOTNET_LAMBDA_RUNTIMES)):
         return format_name_to_path(handler_name, ":", ".dll")
-    if runtime.startswith(LAMBDA_RUNTIME_RUBY):
+    if runtime.startswith("ruby"):
         return format_name_to_path(handler_name, ".", ".rb")
 
     return format_name_to_path(handler_name, ".", ".py")
