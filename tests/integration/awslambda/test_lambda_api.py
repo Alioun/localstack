@@ -1,4 +1,5 @@
 import json
+from io import BytesIO
 
 import pytest
 from botocore.exceptions import ClientError
@@ -15,8 +16,8 @@ from localstack.utils.aws import aws_stack
 from localstack.utils.strings import short_uid
 from localstack.utils.sync import wait_until
 from tests.integration.awslambda.test_lambda import (
+    FUNCTION_MAX_UNZIPPED_SIZE,
     TEST_LAMBDA_INTROSPECT_PYTHON,
-    TEST_LAMBDA_LIBS,
     TEST_LAMBDA_NODEJS,
     TEST_LAMBDA_PYTHON_ECHO,
 )
@@ -36,10 +37,24 @@ def fixture_snapshot(snapshot):
 # class TestLambdaTag: ... # TODO
 # class TestLambdaSigningConfig: ... # TODO
 
-# pytest.mark.skip_snapshot_verify(condition=is_old_provider, paths=[
-#     "$..Architectures",
-#     "$..Environment",
-# ])
+
+# some more common ones that usually don't work in the old provider
+pytestmark = pytest.mark.skip_snapshot_verify(
+    condition=is_old_provider,
+    paths=[
+        "$..Architectures",
+        "$..EphemeralStorage",
+        "$..LastUpdateStatus",
+        "$..MemorySize",
+        "$..State",
+        "$..StateReason",
+        "$..StateReasonCode",
+        "$..VpcConfig",
+        "$..CodeSigningConfig",
+        "$..Environment",  # missing
+        "$..HTTPStatusCode",  # 201 vs 200
+    ],
+)
 
 
 class TestLambdaEventInvokeConfig:
@@ -57,7 +72,6 @@ class TestLambdaEventInvokeConfig:
     ):
         """Testing API actions of function event config"""
 
-        snapshot.add_transformer(snapshot.transform.lambda_api())
         function_name = f"lambda_func-{short_uid()}"
 
         create_lambda_function(
@@ -101,8 +115,10 @@ class TestLambdaEventInvokeConfig:
 
 
 class TestLambdaReservedConcurrency:
+
+    # TODO: make this more robust & add snapshot
     @pytest.mark.skip(reason="very slow (only execute when needed)")
-    # @pytest.mark.aws_validated
+    @pytest.mark.aws_validated
     def test_lambda_provisioned_concurrency_doesnt_apply_to_latest(
         self, lambda_client, logs_client, create_lambda_function
     ):
@@ -159,14 +175,11 @@ class TestLambdaReservedConcurrency:
         # TODO: why is this flaky?
         # assert lambda_client.get_function(FunctionName=func_name, Qualifier='$LATEST')['Configuration']['RevisionId'] == lambda_client.get_function(FunctionName=func_name, Qualifier=first_ver['Version'])['Configuration']['RevisionId']
 
-    @pytest.mark.skip(
-        reason="Doesn't work when the account/region has a current global concurrency limit of < 101"
-    )
-    # @pytest.mark.aws_validated
+    @pytest.mark.aws_validated
+    @pytest.mark.skip_snapshot_verify(condition=is_old_provider)
     def test_function_concurrency(self, lambda_client, create_lambda_function, snapshot):
         """Testing the api of the put function concurrency action"""
 
-        snapshot.add_transformer(snapshot.transform.lambda_api())
         function_name = f"lambda_func-{short_uid()}"
         create_lambda_function(
             handler_file=TEST_LAMBDA_PYTHON_ECHO,
@@ -176,19 +189,17 @@ class TestLambdaReservedConcurrency:
         # TODO botocore.errorfactory.InvalidParameterValueException:
         #  An error occurred (InvalidParameterValueException) when calling the PutFunctionConcurrency operation: Specified ReservedConcurrentExecutions for function decreases account's UnreservedConcurrentExecution below its minimum value of [50].
         response = lambda_client.put_function_concurrency(
-            FunctionName=function_name, ReservedConcurrentExecutions=123
+            FunctionName=function_name, ReservedConcurrentExecutions=1
         )
         snapshot.match("put_function_concurrency", response)
-        assert "ReservedConcurrentExecutions" in response
         response = lambda_client.get_function_concurrency(FunctionName=function_name)
         snapshot.match("get_function_concurrency", response)
-        assert "ReservedConcurrentExecutions" in response
         lambda_client.delete_function_concurrency(FunctionName=function_name)
 
 
 class TestLambdaProvisionedConcurrency:
     @pytest.mark.skip(reason="very slow (only execute when needed)")
-    # @pytest.mark.aws_validated
+    @pytest.mark.aws_validated
     def test_lambda_provisioned_concurrency_moves_with_alias(
         self, lambda_client, logs_client, create_lambda_function, snapshot
     ):
@@ -196,10 +207,10 @@ class TestLambdaProvisionedConcurrency:
         create fn ⇒ publish version ⇒ create alias for version ⇒ put concurrency on alias
         ⇒ new version with change ⇒ change alias to new version ⇒ concurrency moves with alias? same behavior for calls to alias/version?
         """
-        snapshot.add_transformer(snapshot.transform.lambda_api())
 
         func_name = f"test_lambda_{short_uid()}"
         alias_name = f"test_alias_{short_uid()}"
+        snapshot.add_transformer(snapshot.transform.regex(alias_name, "<alias-name>"))
 
         create_result = create_lambda_function(
             func_name=func_name,
@@ -212,20 +223,16 @@ class TestLambdaProvisionedConcurrency:
 
         fn = lambda_client.get_function_configuration(FunctionName=func_name, Qualifier="$LATEST")
         snapshot.match("get-function-configuration", fn)
-        assert fn["State"] == "Active"
 
         first_ver = lambda_client.publish_version(
             FunctionName=func_name, RevisionId=fn["RevisionId"], Description="my-first-version"
         )
         snapshot.match("publish_version_1", first_ver)
-        assert first_ver["State"] == "Active"
-        assert fn["RevisionId"] != first_ver["RevisionId"]
 
         get_function_configuration = lambda_client.get_function_configuration(
             FunctionName=func_name, Qualifier=first_ver["Version"]
         )
-        snapshot.match("get_function_configuration_version_1", first_ver)
-        assert get_function_configuration["RevisionId"] == first_ver["RevisionId"]
+        snapshot.match("get_function_configuration_version_1", get_function_configuration)
 
         # There's no ProvisionedConcurrencyConfiguration yet
         assert get_invoke_init_type(lambda_client, func_name, first_ver["Version"]) == "on-demand"
@@ -235,12 +242,9 @@ class TestLambdaProvisionedConcurrency:
             FunctionName=func_name, FunctionVersion=first_ver["Version"], Name=alias_name
         )
         snapshot.match("create_alias", alias)
-        assert alias["FunctionVersion"] == first_ver["Version"]
-        assert alias["RevisionId"] != first_ver["RevisionId"]
         get_function_result = lambda_client.get_function(
             FunctionName=func_name, Qualifier=first_ver["Version"]
         )
-        versioned_revision_id_before = get_function_result["Configuration"]["RevisionId"]
         snapshot.match("get_function_before_provisioned", get_function_result)
         lambda_client.put_provisioned_concurrency_config(
             FunctionName=func_name, Qualifier=alias_name, ProvisionedConcurrentExecutions=1
@@ -250,8 +254,6 @@ class TestLambdaProvisionedConcurrency:
             FunctionName=func_name, Qualifier=alias_name
         )
         snapshot.match("get_function_after_provisioned", get_function_result)
-        versioned_revision_id_after = get_function_result["Configuration"]["RevisionId"]
-        assert versioned_revision_id_before != versioned_revision_id_after
 
         # Alias AND Version now both use provisioned-concurrency (!)
         assert (
@@ -277,7 +279,6 @@ class TestLambdaProvisionedConcurrency:
             FunctionName=func_name, FunctionVersion=new_version["Version"], Name=alias_name
         )
         snapshot.match("update_alias", new_alias)
-        assert new_alias["RevisionId"] != new_version["RevisionId"]
 
         # lambda should now be provisioning new "hot" execution environments for this new alias->version pointer
         # the old one should be de-provisioned
@@ -305,14 +306,25 @@ class TestLambdaProvisionedConcurrency:
         )
 
         # ProvisionedConcurrencyConfig should only be "registered" to the alias, not the referenced version
-        with pytest.raises(Exception) as e:
+        with pytest.raises(
+            lambda_client.exceptions.ProvisionedConcurrencyConfigNotFoundException
+        ) as e:
             lambda_client.get_provisioned_concurrency_config(
                 FunctionName=func_name, Qualifier=new_version["Version"]
             )
-        e.match("ProvisionedConcurrencyConfigNotFoundException")
+        snapshot.match("provisioned_concurrency_notfound", e.value.response)
 
 
 # API only functions (no lambda execution itself, i.e. no invoke)
+@pytest.mark.skip_snapshot_verify(
+    condition=is_old_provider,
+    paths=[
+        "$..RevisionId",
+        "$..Policy.Statement",
+        "$..PolicyName",
+        "$..PolicyArn",
+    ],
+)
 class TestLambdaPermissions:
     @pytest.mark.aws_validated
     def test_add_lambda_permission_aws(
@@ -344,11 +356,11 @@ class TestLambdaPermissions:
         get_policy_result = lambda_client.get_policy(FunctionName=function_name)
         snapshot.match("get_policy", get_policy_result)
 
-    # @pytest.mark.aws_validated
+    @pytest.mark.skip_snapshot_verify(paths=["$..Message"], condition=is_old_provider)
+    @pytest.mark.aws_validated
     def test_remove_multi_permissions(self, lambda_client, create_lambda_function, snapshot):
         """Tests creation and subsequent removal of multiple permissions, including the changes in the policy"""
 
-        snapshot.add_transformer(snapshot.transform.lambda_api())
         function_name = f"lambda_func-{short_uid()}"
         create_lambda_function(
             handler_file=TEST_LAMBDA_PYTHON_ECHO,
@@ -387,9 +399,7 @@ class TestLambdaPermissions:
                 FunctionName=function_name,
                 StatementId="non-existent",
             )
-
         snapshot.match("expect_error_remove_permission", e.value.response)
-        assert e.value.response["Error"]["Code"] == "ResourceNotFoundException"
 
         lambda_client.remove_permission(
             FunctionName=function_name,
@@ -401,22 +411,19 @@ class TestLambdaPermissions:
             )["Policy"]
         )
         snapshot.match("policy_after_removal", policy)
-        assert policy["Statement"][0]["Sid"] == sid
 
         lambda_client.remove_permission(
             FunctionName=function_name,
             StatementId=sid,
         )
-        with pytest.raises(ClientError) as ctx:
+        with pytest.raises(lambda_client.exceptions.ResourceNotFoundException) as ctx:
             lambda_client.get_policy(FunctionName=function_name)
         snapshot.match("expect_exception_get_policy", ctx.value.response)
-        assert ctx.value.response["Error"]["Code"] == "ResourceNotFoundException"
 
-    # @pytest.mark.aws_validated
+    @pytest.mark.aws_validated
     def test_function_code_signing_config(self, lambda_client, create_lambda_function, snapshot):
         """Testing the API of code signing config"""
 
-        snapshot.add_transformer(snapshot.transform.lambda_api())
         function_name = f"lambda_func-{short_uid()}"
 
         create_lambda_function(
@@ -436,12 +443,6 @@ class TestLambdaPermissions:
         )
         snapshot.match("create_code_signing_config", response)
 
-        assert "Description" in response["CodeSigningConfig"]
-        assert "SigningProfileVersionArns" in response["CodeSigningConfig"]["AllowedPublishers"]
-        assert (
-            "UntrustedArtifactOnDeployment" in response["CodeSigningConfig"]["CodeSigningPolicies"]
-        )
-
         code_signing_arn = response["CodeSigningConfig"]["CodeSigningConfigArn"]
         response = lambda_client.update_code_signing_config(
             CodeSigningConfigArn=code_signing_arn,
@@ -449,44 +450,35 @@ class TestLambdaPermissions:
         )
         snapshot.match("update_code_signing_config", response)
 
-        assert (
-            "Warn"
-            == response["CodeSigningConfig"]["CodeSigningPolicies"]["UntrustedArtifactOnDeployment"]
-        )
         response = lambda_client.get_code_signing_config(CodeSigningConfigArn=code_signing_arn)
-        assert 200 == response["ResponseMetadata"]["HTTPStatusCode"]
         snapshot.match("get_code_signing_config", response)
 
         response = lambda_client.put_function_code_signing_config(
             CodeSigningConfigArn=code_signing_arn, FunctionName=function_name
         )
-        assert 200 == response["ResponseMetadata"]["HTTPStatusCode"]
         snapshot.match("put_function_code_signing_config", response)
 
         response = lambda_client.get_function_code_signing_config(FunctionName=function_name)
-        assert 200 == response["ResponseMetadata"]["HTTPStatusCode"]
         snapshot.match("get_function_code_signing_config", response)
-        assert code_signing_arn == response["CodeSigningConfigArn"]
-        assert function_name == response["FunctionName"]
 
         response = lambda_client.delete_function_code_signing_config(FunctionName=function_name)
-        assert 204 == response["ResponseMetadata"]["HTTPStatusCode"]
+        snapshot.match("delete_function_code_signing_config", response)
 
         response = lambda_client.delete_code_signing_config(CodeSigningConfigArn=code_signing_arn)
-        assert 204 == response["ResponseMetadata"]["HTTPStatusCode"]
+        snapshot.match("delete_code_signing_config", response)
 
-    # @pytest.mark.aws_validated
-    def create_multiple_lambda_permissions(self, lambda_client, create_lambda_function, snapshot):
+    @pytest.mark.aws_validated
+    def test_create_multiple_lambda_permissions(
+        self, lambda_client, create_lambda_function, snapshot
+    ):
         """Test creating multiple lambda permissions and checking the policy"""
 
-        snapshot.add_transformer(snapshot.transform.lambda_api())
         function_name = f"test-function-{short_uid()}"
 
-        # FIXME no zip file/function?
         create_lambda_function(
             func_name=function_name,
             runtime=Runtime.python3_7,
-            libs=TEST_LAMBDA_LIBS,
+            handler_file=TEST_LAMBDA_PYTHON_ECHO,
         )
 
         action = "lambda:InvokeFunction"
@@ -498,7 +490,6 @@ class TestLambdaPermissions:
             Principal="logs.amazonaws.com",
         )
         snapshot.match("add_permission_response_1", resp)
-        assert "Statement" in resp
 
         sid = "kinesis"
         resp = lambda_client.add_permission(
@@ -509,8 +500,6 @@ class TestLambdaPermissions:
         )
         snapshot.match("add_permission_response_2", resp)
 
-        assert "Statement" in resp
-
         policy_response = lambda_client.get_policy(
             FunctionName=function_name,
         )
@@ -520,13 +509,8 @@ class TestLambdaPermissions:
 class TestLambdaUrl:
     @pytest.mark.aws_validated
     def test_url_config_lifecycle(self, lambda_client, create_lambda_function, snapshot):
-        snapshot.add_transformer(snapshot.transform.lambda_api())
-        snapshot.add_transformers_list(
-            [
-                snapshot.transform.key_value(
-                    "FunctionUrl", "lambda-url", reference_replacement=False
-                ),
-            ]
+        snapshot.add_transformer(
+            snapshot.transform.key_value("FunctionUrl", "lambda-url", reference_replacement=False)
         )
 
         function_name = f"test-function-{short_uid()}"
@@ -571,3 +555,66 @@ class TestLambdaUrl:
         with pytest.raises(lambda_client.exceptions.ResourceNotFoundException) as ex:
             lambda_client.get_function_url_config(FunctionName=function_name)
         snapshot.match("failed_getter", ex.value.response)
+
+
+class TestLambdaSizeLimits:
+    def _generate_sized_python_str(self, filepath: str, size: int) -> str:
+        """Generate a text of the specified size by appending #s at the end of the file"""
+        with open(filepath, "r") as f:
+            py_str = f.read()
+        py_str += "#" * (size - len(py_str))
+        return py_str
+
+    @pytest.mark.aws_validated
+    def test_oversized_lambda(self, lambda_client, s3_client, s3_bucket, lambda_su_role, snapshot):
+        function_name = f"test_lambda_{short_uid()}"
+        bucket_key = "test_lambda.zip"
+        code_str = self._generate_sized_python_str(
+            TEST_LAMBDA_PYTHON_ECHO, FUNCTION_MAX_UNZIPPED_SIZE
+        )
+
+        # upload zip file to S3
+        zip_file = testutil.create_lambda_archive(
+            code_str, get_content=True, runtime=Runtime.python3_9
+        )
+        s3_client.upload_fileobj(BytesIO(zip_file), s3_bucket, bucket_key)
+
+        # create lambda function
+        with pytest.raises(lambda_client.exceptions.InvalidParameterValueException) as e:
+            lambda_client.create_function(
+                FunctionName=function_name,
+                Runtime=Runtime.python3_9,
+                Handler="handler.handler",
+                Role=lambda_su_role,
+                Code={"S3Bucket": s3_bucket, "S3Key": bucket_key},
+                Timeout=10,
+            )
+        snapshot.match("invalid_param_exc", e.value.response)
+
+    @pytest.mark.aws_validated
+    def test_large_lambda(
+        self, lambda_client, s3_client, s3_bucket, lambda_su_role, snapshot, cleanups
+    ):
+        function_name = f"test_lambda_{short_uid()}"
+        cleanups.append(lambda: lambda_client.delete_function(FunctionName=function_name))
+        bucket_key = "test_lambda.zip"
+        code_str = self._generate_sized_python_str(
+            TEST_LAMBDA_PYTHON_ECHO, FUNCTION_MAX_UNZIPPED_SIZE - 1000
+        )
+
+        # upload zip file to S3
+        zip_file = testutil.create_lambda_archive(
+            code_str, get_content=True, runtime=Runtime.python3_9
+        )
+        s3_client.upload_fileobj(BytesIO(zip_file), s3_bucket, bucket_key)
+
+        # create lambda function
+        result = lambda_client.create_function(
+            FunctionName=function_name,
+            Runtime=Runtime.python3_9,
+            Handler="handler.handler",
+            Role=lambda_su_role,
+            Code={"S3Bucket": s3_bucket, "S3Key": bucket_key},
+            Timeout=10,
+        )
+        snapshot.match("create_function_large_zip", result)

@@ -1,14 +1,12 @@
 import json
 import logging
 import os
-from io import BytesIO
 from typing import Dict, TypeVar
 
 import pytest
 from botocore.response import StreamingBody
 
 from localstack.aws.api.lambda_ import Runtime
-from localstack.services.awslambda.lambda_api import LAMBDA_DEFAULT_HANDLER
 from localstack.utils import testutil
 from localstack.utils.common import load_file, retry, safe_requests, short_uid, to_bytes, to_str
 from localstack.utils.generic.wait_utils import wait_until
@@ -419,109 +417,6 @@ class TestLambdaURL:
         event = json.loads(result.content)["event"]
         assert "Body" not in event
         assert event["isBase64Encoded"] is False
-
-
-def generate_sized_python_str(filepath: str, size: int) -> str:
-    """Generate a text of the specified size by appending #s at the end of the file"""
-    with open(filepath, "r") as f:
-        py_str = f.read()
-    py_str += "#" * (size - len(py_str))
-    return py_str
-
-
-@pytest.mark.aws_validated
-class TestLambdaSizeLimits:
-    def test_oversized_lambda(self, lambda_client, s3_client, s3_bucket, lambda_su_role, snapshot):
-        snapshot.add_transformer(snapshot.transform.lambda_api())
-
-        function_name = f"test_lambda_{short_uid()}"
-        bucket_key = "test_lambda.zip"
-        code_str = generate_sized_python_str(FUNCTION_MAX_UNZIPPED_SIZE)
-
-        # upload zip file to S3
-        zip_file = testutil.create_lambda_archive(
-            code_str, get_content=True, runtime=Runtime.python3_7
-        )
-        s3_client.upload_fileobj(BytesIO(zip_file), s3_bucket, bucket_key)
-
-        # create lambda function
-        with pytest.raises(lambda_client.exceptions.InvalidParameterValueException) as e:
-            lambda_client.create_function(
-                FunctionName=function_name,
-                Runtime=Runtime.python3_7,
-                Handler=LAMBDA_DEFAULT_HANDLER,
-                Role=lambda_su_role,
-                Code={"S3Bucket": s3_bucket, "S3Key": bucket_key},
-                Timeout=10,
-            )
-        snapshot.match("invalid_param_exc", e.value.response)
-
-    # TODO: snapshot
-    def test_large_lambda(self, lambda_client, s3_client, s3_bucket, lambda_su_role, cleanups):
-        function_name = f"test_lambda_{short_uid()}"
-        cleanups.append(lambda: lambda_client.delete_function(FunctionName=function_name))
-        bucket_key = "test_lambda.zip"
-        code_str = generate_sized_python_str(FUNCTION_MAX_UNZIPPED_SIZE - 1000)
-
-        # upload zip file to S3
-        zip_file = testutil.create_lambda_archive(
-            code_str, get_content=True, runtime=Runtime.python3_7
-        )
-        s3_client.upload_fileobj(BytesIO(zip_file), s3_bucket, bucket_key)
-
-        # create lambda function
-        result = lambda_client.create_function(
-            FunctionName=function_name,
-            Runtime=Runtime.python3_7,
-            Handler=LAMBDA_DEFAULT_HANDLER,
-            Role=lambda_su_role,
-            Code={"S3Bucket": s3_bucket, "S3Key": bucket_key},
-            Timeout=10,
-        )
-
-        function_arn = result["FunctionArn"]
-        assert testutil.response_arn_matches_partition(lambda_client, function_arn)
-
-
-# TODO: move this to fixtures / reconcile with other fixture usage
-@pytest.fixture
-def create_lambda_function_aws(
-    lambda_client,
-):
-    lambda_arns = []
-
-    def _create_lambda_function(**kwargs):
-        def _create_function():
-            resp = lambda_client.create_function(**kwargs)
-            lambda_arns.append(resp["FunctionArn"])
-
-            def _is_not_pending():
-                try:
-                    result = (
-                        lambda_client.get_function(FunctionName=resp["FunctionName"])[
-                            "Configuration"
-                        ]["State"]
-                        != "Pending"
-                    )
-                    return result
-                except Exception as e:
-                    LOG.error(e)
-                    raise
-
-            wait_until(_is_not_pending)
-            return resp
-
-        # @AWS, takes about 10s until the role/policy is "active", until then it will fail
-        # localstack should normally not require the retries and will just continue here
-        return retry(_create_function, retries=3, sleep=4)
-
-    yield _create_lambda_function
-
-    for arn in lambda_arns:
-        try:
-            lambda_client.delete_function(FunctionName=arn)
-        except Exception:
-            LOG.debug(f"Unable to delete function {arn=} in cleanup")
 
 
 @pytest.mark.skip_snapshot_verify
