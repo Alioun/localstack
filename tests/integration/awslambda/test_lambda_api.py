@@ -326,7 +326,6 @@ class TestLambdaPermissions:
             func_name=function_name,
             runtime=Runtime.python3_9,
         )
-        lambda_create_response["CreateFunctionResponse"]["FunctionArn"]
         snapshot.match("create_lambda", lambda_create_response)
         # create lambda permission
         action = "lambda:InvokeFunction"
