@@ -1,0 +1,146 @@
+{
+  "tests/integration/awslambda/test_lambda_api.py::TestLambdaEventInvokeConfig::test_lambda_asynchronous_invocations": {
+    "recorded-date": "31-08-2022, 10:35:56",
+    "recorded-content": {
+      "put_function_event_invoke_config": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": "arn:aws:sqs:<region>:111111111111:<resource:1>"
+          },
+          "OnSuccess": {
+            "Destination": "arn:aws:sqs:<region>:111111111111:<resource:1>"
+          }
+        },
+        "FunctionArn": "arn:aws:lambda:<region>:111111111111:function:<resource:2>:$LATEST",
+        "LastModified": "datetime",
+        "MaximumEventAgeInSeconds": 123,
+        "MaximumRetryAttempts": 2,
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 200
+        }
+      },
+      "put_function_event_invoke_config_overwritemaxeventage": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": "arn:aws:sqs:<region>:111111111111:<resource:1>"
+          },
+          "OnSuccess": {
+            "Destination": "arn:aws:sqs:<region>:111111111111:<resource:1>"
+          }
+        },
+        "FunctionArn": "arn:aws:lambda:<region>:111111111111:function:<resource:2>:$LATEST",
+        "LastModified": "datetime",
+        "MaximumRetryAttempts": 2,
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 200
+        }
+      },
+      "put_function_event_invoke_config_maxattempt1": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": "arn:aws:sqs:<region>:111111111111:<resource:1>"
+          },
+          "OnSuccess": {
+            "Destination": "arn:aws:sqs:<region>:111111111111:<resource:1>"
+          }
+        },
+        "FunctionArn": "arn:aws:lambda:<region>:111111111111:function:<resource:2>:$LATEST",
+        "LastModified": "datetime",
+        "MaximumRetryAttempts": 1,
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 200
+        }
+      }
+    }
+  },
+  "tests/integration/awslambda/test_lambda_api.py::TestLambdaPermissions::test_add_lambda_permission_aws": {
+    "recorded-date": "31-08-2022, 10:47:42",
+    "recorded-content": {
+      "create_lambda": {
+        "CreateEventSourceMappingResponse": null,
+        "CreateFunctionResponse": {
+          "CodeSha256": "code-sha256",
+          "CodeSize": 264,
+          "Description": "",
+          "Environment": {
+            "Variables": {}
+          },
+          "EphemeralStorage": {
+            "Size": 512
+          },
+          "FunctionArn": "arn:aws:lambda:<region>:111111111111:function:<function-name:1>",
+          "FunctionName": "<function-name:1>",
+          "Handler": "handler.handler",
+          "LastModified": "date",
+          "MemorySize": 128,
+          "PackageType": "Zip",
+          "ResponseMetadata": {
+            "HTTPHeaders": {},
+            "HTTPStatusCode": 201
+          },
+          "RevisionId": "<uuid:1>",
+          "Role": "arn:aws:iam::111111111111:role/<resource:1>",
+          "Runtime": "python3.9",
+          "State": "Pending",
+          "StateReason": "The function is being created.",
+          "StateReasonCode": "Creating",
+          "Timeout": 30,
+          "TracingConfig": {
+            "Mode": "PassThrough"
+          },
+          "Version": "$LATEST"
+        }
+      },
+      "add_permission": {
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 201
+        },
+        "Statement": {
+          "Sid": "s3",
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "s3.amazonaws.com"
+          },
+          "Action": "lambda:InvokeFunction",
+          "Resource": "arn:aws:lambda:<region>:111111111111:function:<function-name:1>",
+          "Condition": {
+            "ArnLike": {
+              "AWS:SourceArn": "arn:aws:s3:::<resource:2>"
+            }
+          }
+        }
+      },
+      "get_policy": {
+        "Policy": {
+          "Version": "2012-10-17",
+          "Id": "default",
+          "Statement": [
+            {
+              "Sid": "s3",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "s3.amazonaws.com"
+              },
+              "Action": "lambda:InvokeFunction",
+              "Resource": "arn:aws:lambda:<region>:111111111111:function:<function-name:1>",
+              "Condition": {
+                "ArnLike": {
+                  "AWS:SourceArn": "arn:aws:s3:::<resource:2>"
+                }
+              }
+            }
+          ]
+        },
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 200
+        },
+        "RevisionId": "<uuid:2>"
+      }
+    }
+  }
+}
