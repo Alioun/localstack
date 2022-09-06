@@ -64,6 +64,9 @@ def pytest_runtest_call(item: Item) -> None:
     # TODO: extremely dirty... maybe it would be better to find a way to fail the test itself instead?
     sm = item.funcargs.get("snapshot")
 
+    if call.excinfo:
+        return  # skip trying to evaluate snapshots
+
     if sm:
         verify = True
         paths = []
